@@ -1,0 +1,76 @@
+name: Render video
+on:
+  workflow_dispatch:
+    inputs:
+      serve_url:
+        description: 'URL of a bundled Remotion project (leave blank for test video)'
+        required: false
+        type: string
+      composition:
+        description: 'Composition ID (Demo for the test video)'
+        required: true
+        default: Demo
+        type: string
+      props_json:
+        description: 'Composition props as a JSON object'
+        required: true
+        default: '{}'
+        type: string
+permissions:
+  contents: read
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Prepare renderer and validate inputs
+        env:
+          PROPS_JSON: ${{ inputs.props_json }}
+          SERVE_URL: ${{ inputs.serve_url }}
+          COMPOSITION: ${{ inputs.composition }}
+        run: |
+          mkdir -p render-job
+          cd render-job
+          node <<'NODE'
+          const fs = require('node:fs');
+          const props = JSON.parse(process.env.PROPS_JSON || '{}');
+          if (!props || Array.isArray(props) || typeof props !== 'object') throw new Error('props_json must be a JSON object');
+          if (!/^[a-zA-Z0-9_-]+$/.test(process.env.COMPOSITION)) throw new Error('Invalid composition ID');
+          if (process.env.SERVE_URL && new URL(process.env.SERVE_URL).protocol !== 'https:') throw new Error('serve_url must use HTTPS');
+          fs.writeFileSync('props.json', JSON.stringify(props));
+          fs.writeFileSync('package.json', JSON.stringify({private:true,dependencies:{"@remotion/cli":"4.0.539","remotion":"4.0.539","react":"19.0.0","react-dom":"19.0.0"}}));
+          NODE
+          bun install
+      - name: Create test composition
+        if: inputs.serve_url == ''
+        working-directory: render-job
+        run: |
+          cat > index.jsx <<'JSX'
+          import React from 'react';
+          import {AbsoluteFill, Composition, registerRoot, useCurrentFrame, interpolate} from 'remotion';
+          const Demo = ({title = 'Remotion is ready'}) => {
+            const frame = useCurrentFrame();
+            return <AbsoluteFill style={{background:'#101827',color:'white',fontFamily:'sans-serif',alignItems:'center',justifyContent:'center',fontSize:64,opacity:interpolate(frame,[0,25],[0,1],{extrapolateRight:'clamp'})}}>{title}</AbsoluteFill>;
+          };
+          registerRoot(() => <Composition id="Demo" component={Demo} durationInFrames={90} fps={30} width={1280} height={720}/>);
+          JSX
+      - name: Render MP4
+        working-directory: render-job
+        env:
+          SERVE_URL: ${{ inputs.serve_url }}
+          COMPOSITION: ${{ inputs.composition }}
+        run: |
+          bunx remotion render "${SERVE_URL:-index.jsx}" "$COMPOSITION" output/video.mp4 --props=props.json --codec=h264 --concurrency=2
+      - name: Save video
+        uses: actions/upload-artifact@v4
+        with:
+          name: rendered-video-${{ github.run_id }}
+          path: render-job/output/video.mp4
+          if-no-files-found: error
+          retention-days: 7
